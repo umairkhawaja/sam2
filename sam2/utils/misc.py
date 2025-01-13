@@ -6,12 +6,33 @@
 
 import os
 import warnings
+from datetime import datetime
 from threading import Thread
 
 import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
+
+def parse_timestamp(filename):
+    # Extract the timestamp from the filename (assuming format "YYYY-MM-DDTHH-MM-SS_milli")
+    base_name = os.path.splitext(filename)[0]
+    # Example: "2021-02-01T08-56-23_0741"
+    # Split by "T" and "_" to isolate date, time, and milliseconds
+    date_time_part, milli_part = base_name.split('_')
+    # date_time_part = "2021-02-01T08-56-23"
+    date_str, time_str = date_time_part.split('T')
+    # date_str = "2021-02-01", time_str = "08-56-23"
+    date_str = date_str.replace('-', '')
+    time_str = time_str.replace('-', ':')
+    # Now date_str = "20210201", time_str = "08:56:23"
+    # Construct full datetime string
+    datetime_str = f"{date_str} {time_str}.{milli_part}"
+    
+    # Parse the datetime
+    # Format string: YYYYMMDD HH:MM:SS.mmmm
+    dt = datetime.strptime(datetime_str, "%Y%m%d %H:%M:%S.%f")
+    return dt
 
 
 def get_sdpa_settings():
@@ -245,7 +266,8 @@ def load_video_frames_from_jpg_images(
         for p in os.listdir(jpg_folder)
         if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
     ]
-    frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    # frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+    frame_names.sort(key=lambda p: parse_timestamp(p))
     num_frames = len(frame_names)
     if num_frames == 0:
         raise RuntimeError(f"no images found in {jpg_folder}")
