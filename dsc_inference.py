@@ -3,6 +3,9 @@ import json
 import cv2
 import tempfile
 import torch
+import random
+from datetime import datetime
+
 import numpy as np
 from torchvision import models, transforms
 import sys
@@ -128,6 +131,28 @@ def transform_to_camera_frame(pt_3d: np.ndarray, extrinsic_matrix: np.ndarray) -
     pt_3d_homo = np.append(pt_3d, 1)
     return np.dot(extrinsic_matrix, pt_3d_homo)[:3]
 
+def crop_xyxy_to_image(box, img_width, img_height):
+    """
+    Crops an xyxy bounding box to fit within the given image dimensions.
+
+    Args:
+        box (tuple): Bounding box in (x1, y1, x2, y2) format.
+        img_width (int): Width of the image.
+        img_height (int): Height of the image.
+
+    Returns:
+        tuple: Cropped bounding box (x1, y1, x2, y2).
+    """
+    x1, y1, x2, y2 = box
+
+    # Ensure the box is within image boundaries
+    x1 = max(0, min(x1, img_width - 1))
+    y1 = max(0, min(y1, img_height - 1))
+    x2 = max(0, min(x2, img_width - 1))
+    y2 = max(0, min(y2, img_height - 1))
+
+    return np.array([x1, y1, x2, y2])
+
 def process_recording(
     recording_dir,
     inference_state,
@@ -158,9 +183,11 @@ def process_recording(
 
     all_bboxes_per_frame = []
     all_objects_per_frame = []
+    calib_matrics = []
     intrinsic_matrices = []
     camera_matrices = []
-    extrinsic_matrices = []
+    extrinsic_matrices = {}
+    existing_track_ids = []
     annotation_data = {}
 
     print("\tExtracting Bounding boxes...")
@@ -174,19 +201,24 @@ def process_recording(
             all_bboxes_per_frame.append({})
             all_objects_per_frame.append({})
             camera_matrices.append(None)
-            extrinsic_matrices.append(None)
+            # extrinsic_matrices.append(None)
             continue
 
         frame_metadata = frame_metadata[-1]
         translation = np.array(frame_metadata["extrinsic_translation"])
         rotation = np.array(frame_metadata["extrinsic_rotation"])
         extrinsic_matrix = convert_extrinsic_vectors_to_matrix(translation, rotation)
-        extrinsic_matrices.append(extrinsic_matrix)
+        # extrinsic_matrices.append(extrinsic_matrix)
+        extrinsic_matrices[f_idx] = extrinsic_matrix
 
         intrinsic_matrix = np.array(meta_data["intrinsic_matrix"])
         intrinsic_matrices.append(intrinsic_matrix)
 
-        camera_matrix = intrinsic_matrix @ extrinsic_matrix[:3, :]
+        calib = np.dot(intrinsic_matrix, np.eye(4)[:3, :])
+        # calib_matrics.append(calib)
+
+        # camera_matrix = intrinsic_matrix @ extrinsic_matrix[:3, :]
+        camera_matrix = calib.dot(np.vstack((extrinsic_matrix, [0, 0, 0, 1])))
         camera_matrices.append(camera_matrix)
 
         objects_in_frame = {}
@@ -202,7 +234,8 @@ def process_recording(
 
     for frame_idx, image_file in enumerate(tqdm(image_files, desc='\tRunning SAM2 Image Predictor...', ncols=80)):
         img_path = os.path.join(recording_dir, image_file)
-        with Image.open(img_path).convert("RGB") as pil_image:  # Use context manager
+        with Image.open(img_path).convert("RGB") as pil_image:
+            img_w, img_h = pil_image.size
             np_image = np.array(pil_image)
 
         curr_bboxes = all_bboxes_per_frame[frame_idx]
@@ -227,7 +260,7 @@ def process_recording(
         extrinsic_matrix = extrinsic_matrices[frame_idx]
         f_objects = all_objects_per_frame[frame_idx]
 
-        for obj, mask in zip(f_objects.values(), masks):
+        for obj, mask, bbox in zip(f_objects.values(), masks, boxes_xyxy):
             track_id = obj.track_id
 
             if mask.shape[0] == 1:
@@ -242,8 +275,23 @@ def process_recording(
             y_min, y_max = y_indices.min(), y_indices.max()
 
             # Crop the object and mask using the bounding box
-            cropped_object = np_image[y_min:y_max + 1, x_min:x_max + 1]
-            cropped_mask = mask[y_min:y_max + 1, x_min:x_max + 1]
+            # cropped_object = np_image[y_min:y_max + 1, x_min:x_max + 1]
+            # cropped_mask = mask[y_min:y_max + 1, x_min:x_max + 1]
+            if bbox[0] < 0 or bbox[1] < 0 or bbox[2] > img_w or bbox[3] > img_h:
+                continue # Don't add boundary objects
+
+            bbox = crop_xyxy_to_image(bbox, np_image.shape[1], np_image.shape[0])
+            obj_bbox = bbox.astype(int)
+            # x,y,w,h = obj_bbox
+            # cropped_object = np_image[y:y+h, x:x+w]
+            # cropped_mask = mask[y:y+h, x:x+w]
+
+            x,y,x1,y1 = obj_bbox
+            
+            cropped_object = np_image[y:y1, x:x1]
+            cropped_mask = mask[y:y1, x:x1]
+
+            bbox = np.array([x,y,x1-x,y1-y])
 
             # Convert the cropped image to PIL format
             cropped_object_pil = Image.fromarray(cropped_object)
@@ -265,13 +313,63 @@ def process_recording(
 
 
             # Prepare output folder structure
+            # obj_folder = os.path.join(base_output_dir, f"{track_id}")
+            # datetime_part = image_file.split(".")[0]
+            # current_ts = datetime.strptime(datetime_part, "%Y-%m-%dT%H-%M-%S_%f")
+            
+            # ## If track ID already exists, then create a new one
+            # if os.path.exists(obj_folder):
+            #     existing_annotations = load_json(os.path.join(obj_folder, 'annotations.json'))['frame_data'].keys()
+            #     existing_ts = sorted([datetime.strptime(name.split(".")[0], "%Y-%m-%dT%H-%M-%S_%f") for name in existing_annotations])
+                
+            #     ## TODO: Check if current_ts is within 0.5 seconds of the list of existing ts, if yes then save object to same track, otherwise break and create new track
+            #     track_id = int(track_id) + 1000
+            #     obj_folder = os.path.join(base_output_dir, f"{track_id}")
+            #     obj.track_id = track_id
+
+
             obj_folder = os.path.join(base_output_dir, f"{track_id}")
+            datetime_part = image_file.split(".")[0]
+            current_ts = datetime.strptime(datetime_part, "%Y-%m-%dT%H-%M-%S_%f")
+            current_suffix = int(image_file.split("_")[-1].split(".")[0])
+
             ## If track ID already exists, then create a new one
             if os.path.exists(obj_folder):
-                track_id = int(track_id) + 1000
-                obj_folder = os.path.join(base_output_dir, f"{track_id}")
-                obj.track_id = track_id
+                # existing_annotations = load_json(os.path.join(obj_folder, 'annotations.json'))['frame_data'].keys()
+                images_folder = os.path.join(obj_folder, "images")
+    
+                # Get list of image filenames from obj_folder/images/
+                existing_image_files = [f for f in os.listdir(images_folder) if f.endswith(('.jpg', '.png', '.jpeg'))]
+                
+                # # Extract timestamps from filenames
+                # existing_ts = sorted([
+                #     datetime.strptime(f.split(".")[0], "%Y-%m-%dT%H-%M-%S_%f") 
+                #     for f in existing_image_files
+                # ])
+                # existing_ts = sorted([datetime.strptime(name.split(".")[0], "%Y-%m-%dT%H-%M-%S_%f") for name in existing_annotations])
 
+                # # Check if current timestamp is within 0.5 seconds of any existing timestamp
+                # close_match = all(abs((current_ts - ts).total_seconds()) <= 0.05 for ts in existing_ts)
+
+
+                # Extract suffixes from filenames
+                existing_suffixes = sorted([
+                    int(f.split("_")[-1].split(".")[0]) 
+                    for f in existing_image_files
+                ])
+
+                # # Check if current suffix is in the same range (e.g., both in `_1xx`)
+                close_match = all([abs(current_suffix - suffix) < 50 for suffix in existing_suffixes])
+
+                if not close_match:  # If no close match, create a new track ID
+                    track_id = int(track_id) + random.randint(1000,10000)
+                    while track_id in existing_track_ids:
+                        track_id = int(track_id) + random.randint(1000,10000)
+
+                    obj_folder = os.path.join(base_output_dir, f"{track_id}")
+                    obj.track_id = track_id
+
+            existing_track_ids.append(obj.track_id)
             images_folder = os.path.join(obj_folder, "images")
             os.makedirs(images_folder, exist_ok=True)
             cropped_output_path = os.path.join(
@@ -294,7 +392,7 @@ def process_recording(
                 'translation' : obj.trans.tolist(),
                 'rotation' : obj.rot.tolist(),
                 'dimension' : obj.dim.tolist(),
-                'bbox' : obj.get_bbox(camera_matrix).tolist(),
+                'bbox' : bbox.tolist(),
                 'camera_matrix' : camera_matrix.tolist(),
                 'extrinsic_matrix' : extrinsic_matrix.tolist(),
                 'translation_in_camera_frame' : transform_to_camera_frame(obj.trans, extrinsic_matrix).tolist(),
