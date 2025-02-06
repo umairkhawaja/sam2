@@ -464,7 +464,8 @@ def main(root_directory, checkpoint_path, model_config, validation_recordings=No
 #     return filtered_recordings
 
 if __name__ == "__main__":
-    root_directory = "/home/stud/ukh/workspace/datasets/dev_dataset/"
+    # root_directory = "/home/stud/ukh/workspace/datasets/dev_dataset/"
+    root_directory = "/home/stud/ukh/workspace/datasets/research_dataset/raw/"
     validation_recordings = "/home/stud/ukh/workspace/datasets/validation_recordings.json"
     checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
